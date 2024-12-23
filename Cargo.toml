@@ -1,0 +1,14 @@
+[package]
+name = "physics_nd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wedged = "0.1.0"
+nalgebra = "0.33.2"
+bevy = "0.15.0"
+
+
+[[example]]
+name = "sim"
+src = "../examples/sim/main.rs"
