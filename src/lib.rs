@@ -6,10 +6,10 @@ use wedged::base::{Const, Inv, Zero};
 use wedged::subspace::{Rotor, Rotor4};
 use components::*;
 
-// 4D physics using:
-// https://marctenbosch.com/ndphysics/NDrigidbody.pdf
-// https://www.gdcvault.com/play/1022197/Physics-for-Game-Programmers-Numerical
-
+// References:
+// Marc Ten Bosch 2020: "𝑁-Dimensional Rigid Body Dynamics", https://marctenbosch.com/ndphysics/NDrigidbody.pdf
+// Christian Perwass 2009: "Geometric Algebra with Applications in Engineering", https://link.springer.com/book/10.1007/978-3-540-89068-3
+// Erin Catto 2015: "Physics for Game Programme", https://www.gdcvault.com/play/1022197/Physics-for-Game-Programmers-Numerical
 
 #[test]
 fn test_commutator_stuff() {
@@ -71,8 +71,6 @@ fn gravity_and_const_torque() {
 
         println!("t = {}s, pose: {:?}, rate: {:?}", (i * substeps) as FLOAT * dt, pose, rate);
     }
-
-
 }
 
 /// Integrate the pose and rate of a rigid body using semi-implicit Euler integration
@@ -91,10 +89,13 @@ pub fn integrate(pose: &mut Pose, rate: &mut Rate, inertia: &Inertia, forque: &F
     let dR_dt = -0.5 * dt * &rate.angular * pose.ori.into_even();
     pose.ori = (pose.ori.into_even() - dR_dt.select_even()).into_rotor_unchecked();
 
-    pose.ori = pose.ori.normalize().into_rotor_unchecked();
+    pose.ori = reconstruct_versor(pose.ori.into_versor_unchecked())
+        .try_into_even()
+        .unwrap()
+        .into_rotor_unchecked();
 }
 
-/// Solves for the gyroscopic term of angular velocity update using a single Newton-Raphson iteration
+/// (Adapted from slide 76 in Catto 2015) Solves for the gyroscopic term of angular velocity update using a single Newton-Raphson iteration
 fn solve_gyroscopic_term(ori: &Rotor4<FLOAT>, inertia: &Inertia, ang_vel: &BiVec4<FLOAT>, dt: FLOAT) -> BiVec4<FLOAT> {
     let body_ang_vel = ori.inv().rot(ang_vel);
     let body_ang_momentum = map_bivector(&inertia.inertia_tensor, &body_ang_vel);
@@ -113,14 +114,50 @@ fn solve_gyroscopic_term(ori: &Rotor4<FLOAT>, inertia: &Inertia, ang_vel: &BiVec
 
     let new_ang_vel = ori.rot(&new_body_ang_vel);
 
-    println!("\
-        Solve Gyroscopic Term:\
-        \n  f = {:.5}\
-        \n  ang_vel = {:.5}\
-        \n  body_ang_vel = {:.5}\
-        \n  new_body_ang_vel = {:.5}\
-        \n  new_ang_vel = {:.5}\
-        \n  jacobian = N/A", f, ang_vel, body_ang_vel, new_body_ang_vel, new_ang_vel);
+    // println!("\
+    //     Solve Gyroscopic Term:\
+    //     \n  f = {:.5}\
+    //     \n  ang_vel = {:.5}\
+    //     \n  body_ang_vel = {:.5}\
+    //     \n  new_body_ang_vel = {:.5}\
+    //     \n  new_ang_vel = {:.5}\
+    //     \n  jacobian = N/A", f, ang_vel, body_ang_vel, new_body_ang_vel, new_ang_vel);
 
     new_ang_vel
+}
+
+pub fn proj_sphere(radius: FLOAT) -> (impl Fn(&Vec4<FLOAT>) -> (Vec4<FLOAT>, Vec4<FLOAT>)) {
+    move |pos| (radius * pos.normalize(), pos.normalize())
+}
+
+pub fn proj_torus(r1: FLOAT, r2: FLOAT) -> (impl Fn(&Vec4<FLOAT>) -> (Vec4<FLOAT>, Vec4<FLOAT>)) {
+    move |pos| {
+        let xz_pos = r1 * Vec4::new(pos[0], 0.0, pos[2], 0.0).normalize();
+
+        let normal = (pos - xz_pos).normalize();
+
+        (xz_pos + r2 * normal, normal)
+    }
+}
+
+pub fn project_onto_surface(mut pose: &mut Pose, mut rate: &mut Rate, proj: impl Fn(&Vec4<FLOAT>) -> (Vec4<FLOAT>, Vec4<FLOAT>)) {
+    let Pose { pos, ori } = &mut pose;
+    let (new_pos, normal) = proj(&*pos);
+
+    *pos = new_pos;
+    let rate_norm = rate.linear.norm();
+    rate.linear -= ((rate.linear % normal) * normal).select_grade::<Const<1>>();
+    // rate.linear = rate.linear.normalize() * rate_norm;
+
+    let ori_normal_dir: Vec4<FLOAT> = ori.rot(Vec4::new(1.0, 0.0, 0.0, 0.0));
+    let mid_vector = (ori_normal_dir - normal).normalize();
+    let correction_rotor = (mid_vector * ori_normal_dir).select_even().into_rotor_unchecked();
+
+    *ori = (*correction_rotor * **ori).into_rotor_unchecked();
+    // investigate rot stuff
+    println!("proj angular stuff:\n  ori: {:.4}\n  ori_normal_dir: {:.4}\n  mid_vector: {:.4}\n  correction_rotor: {:.4}\n  new_ori_rot_dir: {:.4}\n  normal: {normal:.4}\n  pos: {pos:.4}\n\n", ori, ori_normal_dir, mid_vector, correction_rotor, ori.rot(Vec4::new(1.0, 0.0, 0.0, 0.0)));
+
+    rate.angular -= ((rate.angular % normal) * normal).select_grade::<Const<2>>();
+
+    println!("rate_norm: {rate_norm:.5}")
 }

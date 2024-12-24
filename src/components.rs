@@ -1,7 +1,8 @@
+use bevy::prelude::FixedLast;
 use nalgebra::{Matrix, SMatrix, SVector, Vector};
 use wedged::algebra::*;
 use wedged::subspace::*;
-use wedged::base::{AllocBlade, AllocMultivector, Const, Inv, U2, Zero};
+use wedged::base::{AllocBlade, AllocEven, AllocMultivector, AllocVersor, Const, Dynamic, Inv, U2, Zero};
 
 pub const N: usize = 4;
 pub const K: usize = N*(N-1)/2;
@@ -229,4 +230,158 @@ pub fn commutator<const DIM: usize>(
     FLOAT: AllocBlade<Const<DIM>, Const<2>> + AllocMultivector<Const<DIM>>
 {
     (b1 * b2 - b2 * b1).select_grade::<Const<2>>() / 2.0
+}
+
+trait VersorOps {
+    fn as_multivector(&self) -> Multivector<FLOAT, Const<N>>;
+
+    fn select_max_grade(&self) -> Blade<FLOAT, Const<N>, Dynamic>;
+
+    fn one() -> Versor<FLOAT, Const<N>> {
+        Versor::Even(Even::<FLOAT, Const<N>>::basis(0).into_rotor_unchecked())
+    }
+
+    fn mul_vector(self, vector: &VecN<FLOAT, Const<N>>) -> Versor<FLOAT, Const<N>>;
+
+    fn vector_mul(self, vector: &VecN<FLOAT, Const<N>>) -> Versor<FLOAT, Const<N>>;
+
+    fn mul_scalar(self, scalar: FLOAT) -> Versor<FLOAT, Const<N>>;
+}
+
+impl VersorOps for Versor<FLOAT, Const<N>> {
+    fn as_multivector(&self) -> Multivector<FLOAT, Const<N>> {
+        match self {
+            Self::Even(rotor) => {
+                Multivector::from_even((*rotor).clone().into_even())
+            },
+            Self::Odd(reflector) => {
+                Multivector::from_odd((*reflector).clone().into_odd())
+            }
+        }
+    }
+
+    fn select_max_grade(&self) -> Blade<FLOAT, Const<N>, Dynamic> {
+        const EPSILON: FLOAT = 1e-4;
+
+        let mv = self.as_multivector();
+
+        for i in (0..=N).rev() {
+            let i_vector = mv.select_grade_dyn(i);
+
+            if !i_vector.as_slice().iter().all(|x| x.abs() < EPSILON) {
+                return i_vector;
+            }
+        }
+
+        mv.select_grade_dyn(0)
+    }
+
+    fn mul_vector(self, vector: &VecN<FLOAT, Const<N>>) -> Versor<FLOAT, Const<N>> {
+        if self.even() {
+            (vector * self.as_multivector()).select_odd().into_versor_unchecked()
+        } else {
+            (vector * self.as_multivector()).select_even().into_versor_unchecked()
+        }
+    }
+
+    fn vector_mul(self, vector: &VecN<FLOAT, Const<N>>) -> Versor<FLOAT, Const<N>> {
+        match self {
+            Self::Even(rotor) => {
+                Self::Odd((*rotor * vector).select_odd().into_reflector_unchecked())
+            },
+            Self::Odd(reflector) => {
+                Self::Even((*reflector * vector).select_even().into_rotor_unchecked())
+            }
+        }
+    }
+
+    fn mul_scalar(self, scalar: FLOAT) -> Versor<FLOAT, Const<N>> {
+        match self {
+            Self::Even(rotor) => {
+                Self::Even((*rotor * scalar).into_rotor_unchecked())
+            },
+            Self::Odd(reflector) => {
+                Self::Odd((*reflector * scalar).into_reflector_unchecked())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_versor_reconstruction() {
+    let vectors: Vec<VecN<FLOAT, Const<N>>> = [
+        [1.0, 3.0, 5.0, 2.0],
+        [-6.0, -2.0, 1.0, 3.0],
+        [-1.0, 5.0, 5.0, 5.0],
+        [2.0, -1.0, 1.0, 8.0],
+        [3.0, -2.0, 4.0, 1.0],
+        [6.0, 10.0, -3.0, 2.0]
+    ].into_iter().map(|[x, y, z, w]| VecN::<FLOAT, Const<N>>::new(x, y, z, w)).collect();
+
+    let norm_vectors: Vec<_> = vectors.iter()
+        .map(|v| v.normalize())
+        .collect();
+
+    println!("norm_vectors: {:?}", norm_vectors);
+
+    let mut versor_unclean = Versor::one();
+    let mut versor_clean = Versor::one();
+
+    for i in 0..vectors.len() {
+        versor_unclean = versor_unclean.vector_mul(&vectors[i]);
+        versor_clean = versor_clean.vector_mul(&norm_vectors[i])
+    }
+
+    let versor_cleaned = reconstruct_versor(versor_unclean.clone());
+
+    println!("Unclean: {}\nCleaned: {}\n  Clean: {}", versor_unclean, versor_cleaned, versor_clean);
+
+    assert!((versor_cleaned.as_multivector() - versor_clean.as_multivector()).norm() < 1e-6)
+}
+
+/// (Adapted from algorithm 3.4 in Perwass 2009) This factors the versor into vectors,
+/// normalizes those vectors, and then reconstructs itself
+pub fn reconstruct_versor(mut versor: Versor<FLOAT, Const<N>>) -> Versor<FLOAT, Const<N>> {
+    // println!("RECONSTRUCT VERSOR:");
+    let mut new_versor = Versor::one();
+    let mut max_grade_vector = versor.select_max_grade();
+    let mut i = 0;
+
+    while max_grade_vector.grade() > 0 && i < 20 {
+        let vector_factor = get_first_blade_factor(&max_grade_vector);
+        // println!("------\nmax_grade_vector: {} (grade: {})\nvector_factor: {}\nversor: {}\nnew_versor: {}", max_grade_vector, max_grade_vector.grade(), vector_factor, versor, new_versor);
+
+        versor = versor.mul_vector(&vector_factor);
+        new_versor = new_versor.vector_mul(&vector_factor);
+
+        max_grade_vector = versor.select_max_grade();
+        i += 1;
+    }
+
+    // println!("------\nmax_grade_vector: {} (grade: {})\nversor: {}\nnew_versor: {}\n--------", max_grade_vector, max_grade_vector.grade(), versor, new_versor);
+
+    let scalar_factor = versor.try_into_even().unwrap()[0];
+
+    new_versor.mul_scalar(scalar_factor.signum())
+}
+
+/// (Adapted from algorithm 3.2 in Perwass 2009)  Returns a factor of the given blade
+pub fn get_first_blade_factor(
+    blade: &Blade<FLOAT, Const<N>, Dynamic>
+) -> VecN<FLOAT, Const<N>> where FLOAT: AllocMultivector<Const<N>> {
+    let mut max_projected_norm_sqr = 0.0;
+    let mut max_projected_basis = VecN::zero();
+    let blade_inv: Blade<FLOAT, Const<N>, Dynamic> = blade / (blade * blade.clone().reverse())[0];
+
+    for i in 0..N {
+        let projected_basis = ((VecN::<FLOAT, Const<N>>::basis(i) % &blade_inv) * blade).select_grade::<Const<1>>();
+        let norm_sqr = projected_basis.norm_sqrd();
+
+        if norm_sqr > max_projected_norm_sqr {
+            max_projected_norm_sqr = norm_sqr;
+            max_projected_basis = projected_basis;
+        }
+    }
+
+    max_projected_basis / max_projected_norm_sqr.sqrt()
 }
