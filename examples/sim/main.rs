@@ -1,13 +1,16 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
 
 use std::any::{type_name, type_name_of_val};
+use std::f32::consts::PI;
 use bevy::color::palettes::basic::GREEN;
 use bevy::color::palettes::css::{RED, WHITE};
+use bevy::pbr::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
 use physics_nd::components::*;
 use physics_nd::*;
 use wedged::algebra as ga;
+use wedged::base::Zero;
 
 const DT: f64 = 0.001;
 const N_SUBSTEPS: usize = 1;
@@ -31,6 +34,8 @@ struct Object {
     forque: Forque
 }
 
+const LENGTHS: [f64; 3] = [0.3, 2.0, 4.0];
+
 /// set up a simple 3D scene
 fn setup(
     mut commands: Commands,
@@ -39,7 +44,7 @@ fn setup(
 ) {
     // cube
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.3, 2.0, 4.0))),
+        Mesh3d(meshes.add(Cuboid::new(LENGTHS[0] as f32, LENGTHS[1] as f32, LENGTHS[2] as f32))),
         MeshMaterial3d(materials.add(Color::srgb_u8(244, 234, 155))),
         Transform::from_xyz(0.0, 0.5, 0.0),
         Object {
@@ -51,7 +56,7 @@ fn setup(
                 linear: ga::Vec4::new(0.0, -50.0, 30.0, 0.0),
                 angular: ga::BiVec4::new(70.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             },
-            inertia: Inertia::cuboid(ga::Vec4::new(0.3, 2.0, 4.0, 1.0), 5.0),
+            inertia: Inertia::cuboid(ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0), 5.0),
             forque: Forque {
                 linear: ga::Vec4::new(0.0, -30000.0, 0.0, 0.0),
                 angular: ga::BiVec4::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -60,18 +65,38 @@ fn setup(
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(Torus::new(7.0, 13.0))),
+        Mesh3d(meshes.add(Torus::new(27.0, 33.0))),
         MeshMaterial3d(materials.add(Color::srgba_u8(164, 194, 255, 150))),
         Transform::from_xyz(0.0, 0.0, 0.0)
     ));
 
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.0, 20.0, 90.0))),
+        MeshMaterial3d(materials.add(Color::srgb_u8(164, 254, 150))),
+        Transform::from_xyz(-0.5, 0.0, 0.0)
+    ));
+
     // light
     commands.spawn((
-        PointLight {
+        DirectionalLight {
+            illuminance: light_consts::lux::OVERCAST_DAY,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0),
+        Transform {
+            translation: Vec3::new(0.0, 2.0, 0.0),
+            rotation: Quat::from_rotation_x(-PI / 4.),
+            ..default()
+        },
+        // The default cascade config is designed to handle large scenes.
+        // As this example has a much smaller world, we can tighten the shadow
+        // bounds for better visual quality.
+        CascadeShadowConfigBuilder {
+            first_cascade_far_bound: 4.0,
+            maximum_distance: 10.0,
+            ..default()
+        }
+            .build(),
     ));
 
     // camera
@@ -80,22 +105,31 @@ fn setup(
         Projection::from(OrthographicProjection {
             // 6 world units per pixel of window height.
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 20.0,
+                viewport_height: 70.0,
             },
             ..OrthographicProjection::default_3d()
         }),
-        Transform::from_xyz(10.0, 20.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(10.0, 10.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
 
 fn physics_update(mut query: Query<(&mut Transform, &mut Object)>, mut gizmos: Gizmos) {
     let (mut transform, mut object_mut): (Mut<Transform>, Mut<Object>) = query.single_mut();
     let object: &mut Object = &mut *object_mut;
-    let proj_fn = proj_torus(10.0, 3.0);//proj_sphere(4.0);
+    let proj_fn = proj_torus(30.0, 3.0);//proj_sphere(4.0);
 
     for _ in 0..N_SUBSTEPS {
         integrate(&mut object.pose, &mut object.rate, &object.inertia, &object.forque, DT / N_SUBSTEPS as f64);
         project_onto_surface(&mut object.pose, &mut object.rate, &proj_fn);
+        cuboid_solve_wall_collision(
+            ga::Vec4::zero(),
+            ga::Vec4::new(1.0, 0.0, 0.0, 0.0),
+            &mut object.pose,
+            &mut object.rate,
+            &object.inertia,
+            1.0,
+            ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0)
+        );
     }
 
     let pos = Vec3::from_slice(&[

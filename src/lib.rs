@@ -81,9 +81,7 @@ pub fn integrate(pose: &mut Pose, rate: &mut Rate, inertia: &Inertia, forque: &F
 
     rate.angular = solve_gyroscopic_term(&pose.ori, &inertia, &rate.angular, dt);
     // ω_2 = ω_1 + dt * ŘI[RτŘ]R (convert torque to body frame, apply inertia, convert back to world frame)
-    println!("  rate.angular: {}", rate.angular);
     rate.angular += dt * pose.ori.inv().rot(map_bivector(&inertia.inv_inertia_tensor, &pose.ori.rot(&forque.angular)));
-    println!("  post-torque rate.angular: {}", rate.angular);
 
     // R += (-0.5 * w * R) * dt
     let dR_dt = -0.5 * dt * &rate.angular * pose.ori.into_even();
@@ -155,9 +153,50 @@ pub fn project_onto_surface(mut pose: &mut Pose, mut rate: &mut Rate, proj: impl
 
     *ori = (*correction_rotor * **ori).into_rotor_unchecked();
     // investigate rot stuff
-    println!("proj angular stuff:\n  ori: {:.4}\n  ori_normal_dir: {:.4}\n  mid_vector: {:.4}\n  correction_rotor: {:.4}\n  new_ori_rot_dir: {:.4}\n  normal: {normal:.4}\n  pos: {pos:.4}\n\n", ori, ori_normal_dir, mid_vector, correction_rotor, ori.rot(Vec4::new(1.0, 0.0, 0.0, 0.0)));
+    // println!("proj angular stuff:\n  ori: {:.4}\n  ori_normal_dir: {:.4}\n  mid_vector: {:.4}\n  correction_rotor: {:.4}\n  new_ori_rot_dir: {:.4}\n  normal: {normal:.4}\n  pos: {pos:.4}\n\n", ori, ori_normal_dir, mid_vector, correction_rotor, ori.rot(Vec4::new(1.0, 0.0, 0.0, 0.0)));
 
     rate.angular -= ((rate.angular % normal) * normal).select_grade::<Const<2>>();
 
-    println!("rate_norm: {rate_norm:.5}")
+    // println!("rate_norm: {rate_norm:.5}")
+}
+
+pub fn cuboid_solve_wall_collision(
+    wall_pos: Vec4<FLOAT>,
+    wall_normal: Vec4<FLOAT>,
+    pose: &mut Pose,
+    rate: &mut Rate,
+    inertia: &Inertia,
+    restitution: FLOAT,
+    cuboid_size: Vec4<FLOAT>
+) {
+    let Pose { pos, ori } = pose;
+    let mut contact_point = None;
+
+    for i in 0..16 {
+        let corner: Vec4<FLOAT> = *pos + ori.rot(Vec4::new(
+            (2.0 * (i & 1) as f64 - 1.0) * cuboid_size[0] / 2.0,
+            (1.0 * (i & 2) as f64 - 1.0) * cuboid_size[1] / 2.0,
+            (0.5 * (i & 4) as f64 - 1.0) * cuboid_size[2] / 2.0,
+            (0.25 * (i & 8) as f64 - 1.0) * cuboid_size[3] / 2.0,
+        ));
+
+        if ((corner - wall_pos) % wall_normal)[0] < 0.0 {
+            contact_point = if let Some((i, point, normal)) = contact_point {
+                Some((i + 1.0, ((corner + i * point) / (i + 1.0)), normal))
+            } else {
+                Some((1.0, corner, wall_normal))
+            };
+        }
+    }
+
+    if let Some((i, point, normal)) = contact_point {
+        println!("CONTACT\n  point: {point:.5} (#points={i})\n  normal: {normal:.5}");
+        let contact_arm = point - *pos;
+        let angular_plane = pose.ori.inv().rot(contact_arm ^ normal);
+        let effective_mass = 1.0 / (inertia.mass - (angular_plane % map_bivector(&inertia.inv_inertia_tensor, &angular_plane))[0]);
+        let vel_constraint = (rate.linear % normal - angular_plane % pose.ori.inv().rot(rate.angular))[0];
+        let impulse_magnitude = -effective_mass * vel_constraint;
+        rate.linear += impulse_magnitude * normal / inertia.mass;
+        rate.angular += impulse_magnitude * pose.ori.rot(map_bivector(&inertia.inv_inertia_tensor, &angular_plane))
+    }
 }
