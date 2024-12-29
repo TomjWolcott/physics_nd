@@ -1,6 +1,10 @@
 pub mod components;
 
-use nalgebra::SMatrix;
+use bevy::color::palettes::basic::YELLOW;
+use bevy::color::palettes::css::{BLUE, GREEN, ORANGE};
+use bevy::math::Vec3;
+use bevy::prelude::Gizmos;
+use nalgebra::{RowSVector, SMatrix, SVector};
 use wedged::algebra::{BiVec4, Vec4};
 use wedged::base::{Const, Inv, Zero};
 use wedged::subspace::{Rotor, Rotor4};
@@ -10,6 +14,8 @@ use components::*;
 // Marc Ten Bosch 2020: "𝑁-Dimensional Rigid Body Dynamics", https://marctenbosch.com/ndphysics/NDrigidbody.pdf
 // Christian Perwass 2009: "Geometric Algebra with Applications in Engineering", https://link.springer.com/book/10.1007/978-3-540-89068-3
 // Erin Catto 2015: "Physics for Game Programme", https://www.gdcvault.com/play/1022197/Physics-for-Game-Programmers-Numerical
+// Daniel Chappuis 2013: "Constraints Derivation for Rigid Body Simulation in 3D", https://danielchappuis.ch/download/ConstraintsDerivationRigidBody3D.pdf
+// Erin Catto 2009: "Modeling and Solving Constraints", https://ubm-twvideo01.s3.amazonaws.com/o1/vault/gdc09/slides/04-GDC09_Catto_Erin_Solver.pdf
 
 #[test]
 fn test_commutator_stuff() {
@@ -74,23 +80,35 @@ fn gravity_and_const_torque() {
 }
 
 /// Integrate the pose and rate of a rigid body using semi-implicit Euler integration
-pub fn integrate(pose: &mut Pose, rate: &mut Rate, inertia: &Inertia, forque: &Forque, dt: FLOAT) {
+pub fn integrate_rate(pose: &Pose, rate: &mut Rate, inertia: &Inertia, forque: &Forque, dt: FLOAT) {
     // Semi-implicit Euler integration
     rate.linear += forque.linear * dt / inertia.mass;
-    pose.pos += rate.linear * dt;
 
     rate.angular = solve_gyroscopic_term(&pose.ori, &inertia, &rate.angular, dt);
     // ω_2 = ω_1 + dt * ŘI[RτŘ]R (convert torque to body frame, apply inertia, convert back to world frame)
     rate.angular += dt * pose.ori.inv().rot(map_bivector(&inertia.inv_inertia_tensor, &pose.ori.rot(&forque.angular)));
+}
+
+pub fn integrate_pose(pose: &mut Pose, rate: &Rate, dt: FLOAT) {
+    pose.pos += rate.linear * dt;
 
     // R += (-0.5 * w * R) * dt
-    let dR_dt = -0.5 * dt * &rate.angular * pose.ori.into_even();
-    pose.ori = (pose.ori.into_even() - dR_dt.select_even()).into_rotor_unchecked();
+    integrate_ori_world(dt, &mut pose.ori, &rate.angular);
 
     pose.ori = reconstruct_versor(pose.ori.into_versor_unchecked())
         .try_into_even()
         .unwrap()
         .into_rotor_unchecked();
+}
+
+fn integrate_ori_world(dt: FLOAT, ori: &mut Rotor4<FLOAT>, ang_vel: &BiVec4<FLOAT>) {
+    let dR_dt = -0.5 * dt * ang_vel * ori.into_even();
+    *ori = (ori.into_even() - dR_dt.select_even()).into_rotor_unchecked();
+}
+
+fn integrate_ori_body(dt: FLOAT, ori: &mut Rotor4<FLOAT>, ang_vel: &BiVec4<FLOAT>) {
+    let dR_dt = -0.5 * dt * ori.into_even() * ang_vel;
+    *ori = (ori.into_even() - dR_dt.select_even()).into_rotor_unchecked();
 }
 
 /// (Adapted from slide 76 in Catto 2015) Solves for the gyroscopic term of angular velocity update using a single Newton-Raphson iteration
@@ -163,11 +181,14 @@ pub fn project_onto_surface(mut pose: &mut Pose, mut rate: &mut Rate, proj: impl
 pub fn cuboid_solve_wall_collision(
     wall_pos: Vec4<FLOAT>,
     wall_normal: Vec4<FLOAT>,
-    pose: &mut Pose,
+    pose: &Pose,
     rate: &mut Rate,
     inertia: &Inertia,
     restitution: FLOAT,
-    cuboid_size: Vec4<FLOAT>
+    friction: FLOAT,
+    cuboid_size: Vec4<FLOAT>,
+    dt: FLOAT,
+    gizmos: &mut Gizmos
 ) {
     let Pose { pos, ori } = pose;
     let mut contact_point = None;
@@ -180,7 +201,27 @@ pub fn cuboid_solve_wall_collision(
             (0.25 * (i & 8) as f64 - 1.0) * cuboid_size[3] / 2.0,
         ));
 
-        if ((corner - wall_pos) % wall_normal)[0] < 0.0 {
+        let mut body_ang_vel = pose.ori.inv().rot(rate.angular);
+        let body_arm = pose.ori.inv().rot(corner - pose.pos);
+        let corner_vel = rate.linear - pose.ori.rot(body_arm % body_ang_vel);
+
+        if i == 0 {
+            let point = Vec3::from_slice(&[
+                corner[0] as f32,
+                corner[1] as f32,
+                corner[2] as f32,
+            ]);
+
+            let point_vel = Vec3::from_slice(&[
+                corner_vel[0] as f32,
+                corner_vel[1] as f32,
+                corner_vel[2] as f32,
+            ]);
+
+            gizmos.arrow(point, point + 4.0 * point_vel.normalize(), ORANGE);
+        }
+
+        if ((corner - wall_pos) % wall_normal)[0] < 0.0 && (corner_vel % wall_normal)[0] < 0.0 {
             contact_point = if let Some((i, point, normal)) = contact_point {
                 Some((i + 1.0, ((corner + i * point) / (i + 1.0)), normal))
             } else {
@@ -190,13 +231,124 @@ pub fn cuboid_solve_wall_collision(
     }
 
     if let Some((i, point, normal)) = contact_point {
-        println!("CONTACT\n  point: {point:.5} (#points={i})\n  normal: {normal:.5}");
-        let contact_arm = point - *pos;
-        let angular_plane = pose.ori.inv().rot(contact_arm ^ normal);
-        let effective_mass = 1.0 / (inertia.mass - (angular_plane % map_bivector(&inertia.inv_inertia_tensor, &angular_plane))[0]);
-        let vel_constraint = (rate.linear % normal - angular_plane % pose.ori.inv().rot(rate.angular))[0];
-        let impulse_magnitude = -effective_mass * vel_constraint;
-        rate.linear += impulse_magnitude * normal / inertia.mass;
-        rate.angular += impulse_magnitude * pose.ori.rot(map_bivector(&inertia.inv_inertia_tensor, &angular_plane))
+        let mut body_ang_vel = pose.ori.inv().rot(rate.angular);
+        let body_arm = pose.ori.inv().rot(point - pose.pos);
+        let b_error = 0.1 * ((point - wall_pos) % wall_normal)[0] / dt;
+        let point_vel = rate.linear - pose.ori.rot(body_arm % body_ang_vel);
+        let b_restitution = restitution * (point_vel % normal)[0];
+
+        //print everything
+        println!("\nCONTACT\n---------------\n  wall_pos: {:.4}\n  wall_normal: {:.4}\n  pose: {:?}\n  rate: {:?}\n  inertia: {:?}\n  restitution: {:.4}\n  cuboid_size: {:.4}\n  dt: {:.4}\n  body_rate: {:.4}\n  body_arm: {:.4}\n  b_error: {:.4}\n  b_restitution: {:.4}\n\n", wall_pos, wall_normal, pose, rate, inertia, restitution, cuboid_size, dt, body_ang_vel, body_arm, b_error, b_restitution);
+        //jacobian
+        println!("jacobian\n---------------\n  linear: {:.4}\n  angular: {:.4}\n\n", -normal, -(body_arm ^ pose.ori.inv().rot(normal)));
+        let force_multiplier = solve_separable_n_body_constraint(
+            [&mut rate.linear],
+            [&mut body_ang_vel],
+            [&inertia],
+            b_error + b_restitution,
+            [normal],
+            [-(body_arm ^ pose.ori.inv().rot(normal))], // Likely cause of problems, when this is big problems is big: (problems) α (this term)
+            FLOAT::INFINITY
+        );
+
+        let normal_x_midvector = (normal + Vec4::<FLOAT>::basis(0)).normalize();
+        let rotor = (normal_x_midvector * Vec4::basis(0)).select_even().into_rotor_unchecked();
+
+        let mut solve_friction_constraint = |tangent: Vec4<FLOAT>| {
+            let _ = solve_separable_n_body_constraint(
+                [&mut rate.linear],
+                [&mut body_ang_vel],
+                [&inertia],
+                0.0,
+                [tangent],
+                [-(body_arm ^ tangent)],
+                force_multiplier * friction
+            );
+        };
+
+        solve_friction_constraint(rotor.rot(Vec4::<FLOAT>::basis(1)));
+        solve_friction_constraint(rotor.rot(Vec4::<FLOAT>::basis(2)));
+        solve_friction_constraint(rotor.rot(Vec4::<FLOAT>::basis(3)));
+
+        rate.angular = pose.ori.rot(body_ang_vel);
+
+        //print updates
+        println!("\nUPDATE\n---------------\n  pose: {:?}\n  rate: {:?}\n  inertia: {:?}\n  restitution: {:.4}\n  cuboid_size: {:.4}\n  dt: {:.4}\n  body_rate: {:.4}\n  body_arm: {:.4}\n  b_error: {:.4}\n  b_restitution: {:.4}\n\n", pose, rate, inertia, restitution, cuboid_size, dt, body_ang_vel, body_arm, b_error, b_restitution);
+
+        let pos = Vec3::from_slice(&[
+            pose.pos[0] as f32,
+            pose.pos[1] as f32,
+            pose.pos[2] as f32,
+        ]);
+
+        let arm = Vec3::from_slice(&[
+            (point - pose.pos)[0] as f32,
+            (point - pose.pos)[1] as f32,
+            (point - pose.pos)[2] as f32,
+        ]);
+
+        let normal = Vec3::from_slice(&[
+            normal[0] as f32,
+            normal[1] as f32,
+            normal[2] as f32,
+        ]);
+
+        let point = Vec3::from_slice(&[
+            point[0] as f32,
+            point[1] as f32,
+            point[2] as f32,
+        ]);
+
+        let point_vel = Vec3::from_slice(&[
+            point_vel[0] as f32,
+            point_vel[1] as f32,
+            point_vel[2] as f32,
+        ]);
+
+        gizmos.arrow(point, point + 2.0 * normal, BLUE);
+        gizmos.arrow(pos, pos + arm, YELLOW);
+        gizmos.arrow(point, point + 4.0 * point_vel.normalize(), GREEN);
     }
+}
+
+pub fn solve_separable_n_body_constraint<const N: usize>(
+    vels: [&mut Vec4<FLOAT>; N],
+    ang_vels: [&mut BiVec4<FLOAT>; N],
+    inertias: [&Inertia; N],
+    bias_velocity: FLOAT,
+    jacobian_linear: [Vec4<FLOAT>; N],
+    jacobian_angular: [BiVec4<FLOAT>; N],
+    multiplier_bound: FLOAT
+) -> FLOAT {
+    let mut inv_constraint_mass = 0.0;
+
+    for i in 0..N {
+        println!("inv_constraint_mass: {:.4}\n  linear: {:.4}, angular: {:.4}", inv_constraint_mass, (jacobian_linear[i] % jacobian_linear[i])[0] / inertias[i].mass, -(jacobian_angular[i] % map_bivector(&inertias[i].inv_inertia_tensor, &jacobian_angular[i]))[0]);
+        inv_constraint_mass += (jacobian_linear[i] % jacobian_linear[i])[0] / inertias[i].mass;
+        inv_constraint_mass -= (jacobian_angular[i] % map_bivector(&inertias[i].inv_inertia_tensor, &jacobian_angular[i]))[0];
+    }
+
+    let mut lagrange_multiplier = -bias_velocity;
+
+    for i in 0..N {
+        println!("lagrange_multiplier: {:.4}\n  linear: {:.4}, angular: {:.4}", lagrange_multiplier, (jacobian_linear[i] % *vels[i])[0], -(jacobian_angular[i] % *ang_vels[i])[0]);
+        lagrange_multiplier -= (jacobian_linear[i] % *vels[i])[0];
+        lagrange_multiplier += (jacobian_angular[i] % *ang_vels[i])[0];
+    }
+
+    lagrange_multiplier /= inv_constraint_mass;
+
+    lagrange_multiplier = lagrange_multiplier.clamp(-multiplier_bound, multiplier_bound);
+
+    println!("lagrange_multiplier: {:.4}\n  inv_constraint_mass: {:.4}", lagrange_multiplier, inv_constraint_mass);
+
+    for i in 0..N {
+        *vels[i] += lagrange_multiplier * jacobian_linear[i] / inertias[i].mass;
+
+        *ang_vels[i] += lagrange_multiplier * map_bivector(&inertias[i].inv_inertia_tensor, &jacobian_angular[i]);
+
+        println!("dv: {:.4}\n  dω: {:.4}", lagrange_multiplier * jacobian_linear[i] / inertias[i].mass, lagrange_multiplier * map_bivector(&inertias[i].inv_inertia_tensor, &jacobian_angular[i]));
+    }
+
+    lagrange_multiplier
 }

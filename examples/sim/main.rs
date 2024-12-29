@@ -3,16 +3,16 @@
 use std::any::{type_name, type_name_of_val};
 use std::f32::consts::PI;
 use bevy::color::palettes::basic::GREEN;
-use bevy::color::palettes::css::{RED, WHITE};
+use bevy::color::palettes::css::{BLACK, RED, WHITE};
 use bevy::pbr::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
 use physics_nd::components::*;
 use physics_nd::*;
 use wedged::algebra as ga;
-use wedged::base::Zero;
+use wedged::base::{Const, Zero};
 
-const DT: f64 = 0.001;
+const DT: f64 = 0.0001;
 const N_SUBSTEPS: usize = 1;
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .insert_resource(ClearColor(WHITE.into()))
+        .insert_resource(ClearColor(BLACK.into()))
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, physics_update)
         .run();
@@ -42,6 +42,8 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let angle = (30.0_f64).to_radians() / 2.0;
+
     // cube
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(LENGTHS[0] as f32, LENGTHS[1] as f32, LENGTHS[2] as f32))),
@@ -49,31 +51,31 @@ fn setup(
         Transform::from_xyz(0.0, 0.5, 0.0),
         Object {
             pose: Pose {
-                pos: ga::Vec4::new(2.0, 0.0, 0.0, 0.0),
-                ..default()
+                pos: ga::Vec4::new(0.0, -0.0, 0.0, 0.0),
+                ori: (ga::Vec4::new(0.0, 1.0, 0.0, 0.0) * ga::Vec4::new(0.0, angle.cos(), angle.sin(), 0.0)).select_even().into_rotor_unchecked()
             },
             rate: Rate {
-                linear: ga::Vec4::new(0.0, -50.0, 30.0, 0.0),
-                angular: ga::BiVec4::new(70.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                linear: ga::Vec4::new(0.0, 0.0, 0.0, 0.0),
+                angular: ga::BiVec4::new(0.0, 0.0, 10.0, 0.0, 0.0, 0.0)
             },
             inertia: Inertia::cuboid(ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0), 5.0),
             forque: Forque {
-                linear: ga::Vec4::new(0.0, -30000.0, 0.0, 0.0),
+                linear: ga::Vec4::new(0.0, -50000.0, 0.0, 0.0),
                 angular: ga::BiVec4::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
         }
     ));
 
-    commands.spawn((
-        Mesh3d(meshes.add(Torus::new(27.0, 33.0))),
-        MeshMaterial3d(materials.add(Color::srgba_u8(164, 194, 255, 150))),
-        Transform::from_xyz(0.0, 0.0, 0.0)
-    ));
+    // commands.spawn((
+    //     Mesh3d(meshes.add(Torus::new(27.0, 33.0))),
+    //     MeshMaterial3d(materials.add(Color::srgba_u8(164, 194, 255, 150))),
+    //     Transform::from_xyz(0.0, 0.0, 0.0)
+    // ));
 
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 20.0, 90.0))),
+        Mesh3d(meshes.add(Cuboid::new(30.0, 1.0, 30.0))),
         MeshMaterial3d(materials.add(Color::srgb_u8(164, 254, 150))),
-        Transform::from_xyz(-0.5, 0.0, 0.0)
+        Transform::from_xyz(0.0, -10.5, 0.0)
     ));
 
     // light
@@ -83,11 +85,7 @@ fn setup(
             shadows_enabled: true,
             ..default()
         },
-        Transform {
-            translation: Vec3::new(0.0, 2.0, 0.0),
-            rotation: Quat::from_rotation_x(-PI / 4.),
-            ..default()
-        },
+        Transform::from_xyz(20.0, 30.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y),
         // The default cascade config is designed to handle large scenes.
         // As this example has a much smaller world, we can tighten the shadow
         // bounds for better visual quality.
@@ -102,14 +100,14 @@ fn setup(
     // camera
     commands.spawn((
         Camera3d::default(),
-        Projection::from(OrthographicProjection {
-            // 6 world units per pixel of window height.
-            scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 70.0,
-            },
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(10.0, 10.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y),
+        // Projection::from(OrthographicProjection {
+        //     // 6 world units per pixel of window height.
+        //     scaling_mode: ScalingMode::FixedVertical {
+        //         viewport_height: 20.0,
+        //     },
+        //     ..OrthographicProjection::default_3d()
+        // }),
+        Transform::from_xyz(10.0, 5.0, 20.0).looking_at(-5.0 * Vec3::Y, Vec3::Y),
     ));
 }
 
@@ -119,17 +117,28 @@ fn physics_update(mut query: Query<(&mut Transform, &mut Object)>, mut gizmos: G
     let proj_fn = proj_torus(30.0, 3.0);//proj_sphere(4.0);
 
     for _ in 0..N_SUBSTEPS {
-        integrate(&mut object.pose, &mut object.rate, &object.inertia, &object.forque, DT / N_SUBSTEPS as f64);
-        project_onto_surface(&mut object.pose, &mut object.rate, &proj_fn);
+        println!(
+            "pose.ori: {:?}\n  grade0: {}\n  grade2: {}\n  grade4: {}",
+            object.pose.ori,
+            object.pose.ori.select_grade::<Const<0>>(),
+            object.pose.ori.select_grade::<Const<2>>(),
+            object.pose.ori.select_grade::<Const<4>>()
+        );
+        integrate_rate(&object.pose, &mut object.rate, &object.inertia, &object.forque, DT / N_SUBSTEPS as f64);
+        // project_onto_surface(&mut object.pose, &mut object.rate, &proj_fn);
         cuboid_solve_wall_collision(
-            ga::Vec4::zero(),
-            ga::Vec4::new(1.0, 0.0, 0.0, 0.0),
+            ga::Vec4::new(0.0, -10.0, 0.0, 0.0),
+            ga::Vec4::new(0.0, 1.0, 0.0, 0.0),
             &mut object.pose,
             &mut object.rate,
             &object.inertia,
-            1.0,
-            ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0)
+            0.5,
+            0.5,
+            ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0),
+            DT / N_SUBSTEPS as f64,
+            &mut gizmos
         );
+        integrate_pose(&mut object.pose, &mut object.rate, DT / N_SUBSTEPS as f64);
     }
 
     let pos = Vec3::from_slice(&[
