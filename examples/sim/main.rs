@@ -42,7 +42,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let angle = (30.0_f64).to_radians() / 2.0;
+    let angle = (0.0_f64).to_radians() / 2.0;
 
     // cube
     commands.spawn((
@@ -56,11 +56,11 @@ fn setup(
             },
             rate: Rate {
                 linear: ga::Vec4::new(0.0, 0.0, 0.0, 0.0),
-                angular: ga::BiVec4::new(0.0, 0.0, 10.0, 0.0, 0.0, 0.0)
+                angular: ga::BiVec4::new(200.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             },
             inertia: Inertia::cuboid(ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0), 5.0),
             forque: Forque {
-                linear: ga::Vec4::new(0.0, -50000.0, 0.0, 0.0),
+                linear: ga::Vec4::new(0.0, -200000.0, 0.0, 0.0),
                 angular: ga::BiVec4::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
         }
@@ -100,14 +100,14 @@ fn setup(
     // camera
     commands.spawn((
         Camera3d::default(),
-        // Projection::from(OrthographicProjection {
-        //     // 6 world units per pixel of window height.
-        //     scaling_mode: ScalingMode::FixedVertical {
-        //         viewport_height: 20.0,
-        //     },
-        //     ..OrthographicProjection::default_3d()
-        // }),
-        Transform::from_xyz(10.0, 5.0, 20.0).looking_at(-5.0 * Vec3::Y, Vec3::Y),
+        Projection::from(OrthographicProjection {
+            // 6 world units per pixel of window height.
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: 20.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(30.0, -5.0, 0.0).looking_at(-5.0 * Vec3::Y, Vec3::Y),
     ));
 }
 
@@ -133,7 +133,7 @@ fn physics_update(mut query: Query<(&mut Transform, &mut Object)>, mut gizmos: G
             &mut object.rate,
             &object.inertia,
             0.5,
-            0.5,
+            1.0,
             ga::Vec4::new(LENGTHS[0], LENGTHS[1], LENGTHS[2], 1.0),
             DT / N_SUBSTEPS as f64,
             &mut gizmos

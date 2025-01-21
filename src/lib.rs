@@ -261,7 +261,7 @@ pub fn cuboid_solve_wall_collision(
                 [&inertia],
                 0.0,
                 [tangent],
-                [-(body_arm ^ tangent)],
+                [(body_arm ^ tangent)],
                 force_multiplier * friction
             );
         };
